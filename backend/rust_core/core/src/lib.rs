@@ -9,8 +9,7 @@ fn some_function() -> String {
 
 /// This is the module that will be exposed to Python.
 #[pymodule]
-fn rust_backend(_py: Python, m: &PyModule) -> PyResult<()> {
-    // Register the function inside the module.
-    m.add_function(wrap_pyfunction!(some_function, m)?)?;
+fn rust_backend(py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(some_function, py)?)?;
     Ok(())
 }

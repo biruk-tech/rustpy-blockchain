@@ -39,3 +39,12 @@ pyrust-blockchain/
 ├── docker-compose.yml      # Orchestration for all services
 └── README.md               # Documentation
 ```
+
+```bash
+make develop         # Build Rust workspace and install Rust modules in Python
+make build           # Compile Rust workspace
+make test            # Run all Rust tests
+make clean           # Clean Rust and Python artifacts
+make run-python      # Run a Python script
+make run-fastapi     # Run the FastAPI server
+```
