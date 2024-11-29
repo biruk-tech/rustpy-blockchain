@@ -5,6 +5,7 @@ use rand::thread_rng;
 use serde_json::json;
 use tracing::info;
 // use crate::websocket::WebsocketError;
+use std::net::SocketAddr;
 
 async fn get_routes() -> String {
     let routes = json!({
@@ -35,7 +36,8 @@ pub async fn start_server() {
     let app = Router::new()
         .route("/", get(get_routes))
         .route("/generate_key_pair", get(generate_key_pair));
-
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    println!("HTTP server running on http://{}", addr);
     axum::Server::bind(&"0.0.0.0:8080".parse().unwrap())
         .serve(app.into_make_service())
         .await
