@@ -3,17 +3,20 @@ PYTHON_VENV = ./.pyvenv/bin/activate
 UVICORN_APP = backend/python/app.py
 
 # Targets
-develop:
-	.  $(PYTHON_VENV)	&&	cd	backend/rust_core	&&	maturin	develop	&&	cargo	build	--workspace
-
 build:
-	cargo	build	--workspace
+	cd	backend/rust_crypto	&&	cargo	build	--workspace
+
+update:
+	cd	backend/rust_crypto	&&	cargo	update	--workspace
+
+run:
+	cd	backend/rust_crypto	&&	cargo	run
 
 test:
 	cargo	test	--workspace
 
 clean:
-	cargo	clean	&&	rm	-rf	backend/python/.venv
+	cd	backend/rust_crypto	&& cargo	clean
 
 run-python:
 	$(PYTHON_VENV)	&&	python	backend/python/main.py

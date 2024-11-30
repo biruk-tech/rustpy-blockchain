@@ -4,7 +4,6 @@ use k256::ecdsa::{SigningKey, VerifyingKey};
 use rand::thread_rng;
 use serde_json::json;
 use tracing::info;
-// use crate::websocket::WebsocketError;
 use std::net::SocketAddr;
 
 async fn get_routes() -> String {
@@ -15,7 +14,7 @@ async fn get_routes() -> String {
     routes.to_string()
 }
 
-async fn generate_key_pair() -> Json<(String, String)> {
+async fn generate_key_pair() -> Json<serde_json::Value> {
     // Generate signing key (private key) using a secure random number generator
     let signing_key = SigningKey::random(&mut thread_rng());
 
@@ -29,7 +28,10 @@ async fn generate_key_pair() -> Json<(String, String)> {
     let public_key =
         general_purpose::STANDARD.encode(verifying_key.to_encoded_point(false).as_bytes());
 
-    Json((public_key, private_key))
+    Json(json!({
+        "private_key": private_key,
+        "public_key": public_key
+    }))
 }
 
 pub async fn start_server() {

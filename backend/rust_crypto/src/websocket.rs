@@ -1,28 +1,105 @@
-use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::accept_async;
 use futures_util::{StreamExt, SinkExt};
-use serde_json::{json};
+use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{info, warn, error};
+use tracing::{info, warn };
 use crate::message::BlockchainMessage;
+use k256::ecdsa::{SigningKey, VerifyingKey};
+use rand_core::OsRng;
 
-pub type SharedSink = Arc<Mutex<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, Message>>>;
-pub type SharedClients = Arc<Mutex<Vec<SharedSink>>>;
+async fn handle_message(
+    payload: &str,
+    signing_key: &SigningKey,
+    verifying_key: &VerifyingKey,
+) -> Result<Option<String>, String> {
+    // Deserialize the message
+    let blockchain_message: BlockchainMessage = serde_json::from_str(payload)
+        .map_err(|e| format!("Invalid message format: {}", e))?;
 
-/// Start WebSocket server
-pub async fn start_websocket_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = TcpListener::bind("127.0.0.1:8081").await?;
-    info!("WebSocket server running on ws://127.0.0.1:8081");
+    // Verify the incoming message's signature
+    if !blockchain_message.verify_signature(verifying_key) {
+        return Err("Invalid message signature".to_string());
+    }
 
-    let clients = Arc::new(Mutex::new(Vec::<SharedSink>::new()));
+    match blockchain_message.r#type.as_str() {
+        "transaction" => {
+            info!("Processing transaction: {:?}", blockchain_message.data);
+
+            let mut response_message = BlockchainMessage::new(
+                "response",
+                json!({
+                    "status": "success",
+                    "message": "Transaction processed successfully"
+                }),
+            );
+
+            // Sign the response
+            response_message.sign(signing_key);
+
+            Ok(serde_json::to_string(&response_message).ok())
+        }
+        "ping" => {
+            let mut response_message = BlockchainMessage::new(
+                "pong",
+                json!({
+                    "message": "pong"
+                }),
+            );
+
+            // Sign the response
+            response_message.sign(signing_key);
+
+            Ok(serde_json::to_string(&response_message).ok())
+        }
+        "shutdown" => {
+            info!("Shutdown request received.");
+
+            let mut response_message = BlockchainMessage::new(
+                "shutdown_ack",
+                json!({
+                    "message": "Server shutting down..."
+                }),
+            );
+
+            // Sign the response
+            response_message.sign(signing_key);
+
+            Ok(serde_json::to_string(&response_message).ok())
+        }
+        _ => {
+            warn!("Unknown message type: {}", blockchain_message.r#type);
+
+            let mut response_message = BlockchainMessage::new(
+                "error",
+                json!({
+                    "message": format!("Unknown message type: {}", blockchain_message.r#type)
+                }),
+            );
+
+            // Sign the response
+            response_message.sign(signing_key);
+
+            Ok(serde_json::to_string(&response_message).ok())
+        }
+    }
+}
+
+pub async fn start_websocket_server() -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8081").await?;
+    tracing::info!("WebSocket server running on ws://127.0.0.1:8081");
+    let signing_key = SigningKey::random(&mut OsRng);
+    let _verifying_key = signing_key.verifying_key(); 
+    
+    let signing_key = Arc::new(SigningKey::random(&mut OsRng)); // Wrap `signing_key` directly in `Arc`
+    let verifying_key = Arc::new(VerifyingKey::from(signing_key.as_ref())); // Create an owned `VerifyingKey`
 
     while let Ok((stream, _)) = listener.accept().await {
-        let clients = clients.clone();
+        let signing_key = Arc::clone(&signing_key);
+        let verifying_key = Arc::clone(&verifying_key);
+
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, clients).await {
-                error!("Error handling connection: {}", e);
+            if let Err(e) = handle_connection(stream, &signing_key, &verifying_key).await {
+                tracing::error!("Connection error: {}", e);
             }
         });
     }
@@ -32,104 +109,38 @@ pub async fn start_websocket_server() -> Result<(), Box<dyn std::error::Error + 
 
 async fn handle_connection(
     stream: tokio::net::TcpStream,
-    clients: SharedClients,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = accept_async(stream)
-        .await
-        .map_err(|e| format!("Failed to accept WebSocket connection: {}", e))?;
+    signing_key: &SigningKey,
+    verifying_key: &VerifyingKey,
+) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let ws_stream = accept_async(stream).await?;
     info!("New WebSocket connection established");
 
-    let (write, mut read) = ws_stream.split();
-    let write = Arc::new(Mutex::new(write));
-
-    {
-        let mut clients_lock = clients.lock().await;
-        clients_lock.push(write.clone());
-    }
+    let (mut write, mut read) = ws_stream.split();
 
     while let Some(msg) = read.next().await {
-        match msg {
-            Ok(msg) if msg.is_text() => {
+        if let Ok(msg) = msg {
+            if msg.is_text() {
                 let payload = msg.into_text().unwrap();
-                info!("Received message: {}", payload);
 
-                let response = handle_message(&payload).await.unwrap_or_else(|e| {
-                    warn!("Error processing message: {}", e);
-                    json!({ "type": "error", "message": e }).to_string()
-                });
-
-                let mut write_guard = write.lock().await;
-                write_guard.send(Message::Text(response)).await.map_err(|e| {
-                    format!("Failed to send message: {}", e)
-                })?;
-            }
-            Ok(_) => warn!("Received unsupported WebSocket message"),
-            Err(e) => {
-                error!("Error receiving message: {}", e);
-                break;
+                match handle_message(&payload, signing_key, verifying_key).await {
+                    Ok(Some(response)) => {
+                        write.send(tokio_tungstenite::tungstenite::protocol::Message::Text(response))
+                            .await
+                            .unwrap();
+                    }
+                    Ok(None) => (), // No response needed
+                    Err(e) => {
+                        warn!("Failed to process message: {}", e);
+                        write.send(tokio_tungstenite::tungstenite::protocol::Message::Text(
+                            "Error processing message".to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                }
             }
         }
     }
 
     Ok(())
 }
-
-async fn handle_message(payload: &str) -> Result<String, String> {
-    let blockchain_message: BlockchainMessage = serde_json::from_str(payload)
-        .map_err(|e| format!("Invalid message format: {}", e))?;
-
-    if !blockchain_message.is_valid() {
-        return Err("Invalid message signature".to_string());
-    }
-
-    match blockchain_message.r#type.as_str() {
-        "transaction" => {
-            info!("Processing transaction: {:?}", blockchain_message.data);
-
-            let response_message = BlockchainMessage::new(
-                "response",
-                json!({
-                    "status": "success",
-                    "message": "Transaction processed successfully"
-                }),
-                "dummy-signature",
-            );
-
-            Ok(serde_json::to_string(&response_message).unwrap())
-        }
-        "ping" => {
-            let response_message = BlockchainMessage::new(
-                "pong",
-                json!({ "message": "pong" }),
-                "dummy-signature",
-            );
-
-            Ok(serde_json::to_string(&response_message).unwrap())
-        }
-        "shutdown" => {
-            info!("Shutdown request received.");
-
-            let response_message = BlockchainMessage::new(
-                "shutdown_ack",
-                json!({ "message": "Server shutting down..." }),
-                "dummy-signature",
-            );
-
-            Ok(serde_json::to_string(&response_message).unwrap())
-        }
-        _ => {
-            warn!("Unknown message type: {}", blockchain_message.r#type);
-
-            let response_message = BlockchainMessage::new(
-                "error",
-                json!({
-                    "message": format!("Unknown message type: {}", blockchain_message.r#type)
-                }),
-                "dummy-signature",
-            );
-
-            Ok(serde_json::to_string(&response_message).unwrap())
-        }
-    }
-}
-
